@@ -1,0 +1,40 @@
+name: Train and publish model artifact
+on:
+  workflow_dispatch:
+    inputs:
+      epochs:
+        description: "Training epochs"
+        required: true
+        default: "5"
+        type: string
+  schedule:
+    - cron: "0 2 * * 0"
+jobs:
+  train:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+      - name: Install training dependencies
+        run: pip install -r requirements-dev.txt
+      - name: Download dataset
+        run: python scripts/download_dataset.py
+      - name: Train
+        env:
+          EPOCHS: ${{ inputs.epochs || '5' }}
+        run: python scripts/train.py --epochs "$EPOCHS"
+      - name: Evaluate
+        run: python scripts/evaluate.py
+      - name: Upload model artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: plant-disease-resnet18
+          path: |
+            models/plant_disease_resnet18.pth
+            reports/training_history.json
+            reports/evaluation.json
+          retention-days: 30
