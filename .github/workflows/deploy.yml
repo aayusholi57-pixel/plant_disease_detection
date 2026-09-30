@@ -52,33 +52,37 @@ jobs:
           set -e
 
           docker build \
-            -t "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" \
-            -t "$ECR_REGISTRY/$ECR_REPOSITORY:latest" \
+            -t "\(ECR_REGISTRY/\)ECR_REPOSITORY:$IMAGE_TAG" \
+            -t "\(ECR_REGISTRY/\)ECR_REPOSITORY:latest" \
             .
 
-          docker push "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
-          docker push "$ECR_REGISTRY/$ECR_REPOSITORY:latest"
+          docker push "\(ECR_REGISTRY/\)ECR_REPOSITORY:$IMAGE_TAG"
+          docker push "\(ECR_REGISTRY/\)ECR_REPOSITORY:latest"
 
       - name: Deploy to EC2 via SSH
         uses: appleboy/ssh-action@v1.0.3
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         with:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USERNAME }}
           key: ${{ secrets.EC2_SSH_KEY }}
+          envs: ECR_REGISTRY, AWS_REGION, ECR_REPOSITORY
           script: |
             set -e
 
             mkdir -p ~/app
             cd ~/app
 
+            # Authenticate Docker using EC2's IAM instance profile & runner environment
             aws ecr get-login-password \
-              --region "${{ env.AWS_REGION }}" | \
+              --region "$AWS_REGION" | \
               docker login \
                 --username AWS \
                 --password-stdin \
-                "${{ steps.login-ecr.outputs.registry }}"
+                "$ECR_REGISTRY"
 
-            export ECR_IMAGE="${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest"
+            export ECR_IMAGE="\(ECR_REGISTRY/\)ECR_REPOSITORY:latest"
 
             docker pull "$ECR_IMAGE"
 
