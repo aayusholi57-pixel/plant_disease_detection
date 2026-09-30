@@ -4,8 +4,16 @@ on:
   push:
     branches:
       - main
-
   workflow_dispatch:
+    inputs:
+      force_rebuild:
+        description: "Force rebuild without cache"
+        required: false
+        default: "false"
+      skip_healthcheck:
+        description: "Skip application health checks"
+        required: false
+        default: "false"
 
 permissions:
   contents: read
@@ -21,9 +29,75 @@ env:
   IMAGE_TAG: ${{ github.sha }}
 
 jobs:
-  build:
-    name: Build and Push Docker Image
+  validate:
+    name: Validate deployment config
     runs-on: ubuntu-latest
+    outputs:
+      valid: ${{ steps.validate.outputs.valid }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Validate required secrets
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          for secret_name in \
+            AWS_REGION \
+            AWS_ACCESS_KEY_ID \
+            AWS_SECRET_ACCESS_KEY \
+            EC2_HOST \
+            EC2_USERNAME \
+            EC2_SSH_KEY
+          do
+            if [ -z "${!secret_name:-}" ]; then
+              echo "::error::Missing required secret: $secret_name"
+              exit 1
+            fi
+          done
+
+          echo "All required secrets are configured."
+
+      - name: Validate Docker and compose files
+        id: validate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          test -f Dockerfile || {
+            echo "::error::Dockerfile not found"
+            exit 1
+          }
+
+          test -f docker-compose.yml || {
+            echo "::error::docker-compose.yml not found"
+            exit 1
+          }
+
+          python3 - <<'PY'
+          import sys
+          import yaml
+          try:
+              with open("docker-compose.yml", "r", encoding="utf-8") as fh:
+                  yaml.safe_load(fh)
+              print("docker-compose.yml is valid YAML")
+          except Exception as exc:
+              print(f"::error::docker-compose.yml is invalid: {exc}")
+              sys.exit(1)
+          PY
+
+          echo "valid=true" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build and push Docker image
+    needs: validate
+    if: needs.validate.outputs.valid == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
 
     outputs:
       registry: ${{ steps.ecr.outputs.registry }}
@@ -32,21 +106,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      - name: Validate required files
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-
-          test -f Dockerfile || {
-            echo "::error::Dockerfile was not found"
-            exit 1
-          }
-
-          test -f docker-compose.yml || {
-            echo "::error::docker-compose.yml was not found"
-            exit 1
-          }
+        with:
+          fetch-depth: 1
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -68,6 +129,7 @@ jobs:
             --repository-names "$ECR_REPOSITORY" \
             --region "$AWS_REGION" >/dev/null 2>&1; then
 
+            echo "ECR repository does not exist. Creating it..."
             aws ecr create-repository \
               --repository-name "$ECR_REPOSITORY" \
               --region "$AWS_REGION" \
@@ -81,32 +143,30 @@ jobs:
                 "rules": [
                   {
                     "rulePriority": 1,
-                    "description": "Keep the newest 20 tagged images",
+                    "description": "Keep newest 20 sha images",
                     "selection": {
                       "tagStatus": "tagged",
                       "tagPrefixList": ["sha-"],
                       "countType": "imageCountMoreThan",
                       "countNumber": 20
                     },
-                    "action": {
-                      "type": "expire"
-                    }
+                    "action": { "type": "expire" }
                   },
                   {
                     "rulePriority": 2,
-                    "description": "Delete untagged images after one day",
+                    "description": "Remove untagged images after 7 days",
                     "selection": {
                       "tagStatus": "untagged",
                       "countType": "sinceImagePushed",
                       "countUnit": "days",
-                      "countNumber": 1
+                      "countNumber": 7
                     },
-                    "action": {
-                      "type": "expire"
-                    }
+                    "action": { "type": "expire" }
                   }
                 ]
               }'
+          else
+            echo "ECR repository already exists."
           fi
 
       - name: Set image name
@@ -118,9 +178,13 @@ jobs:
           set -Eeuo pipefail
 
           IMAGE="$REGISTRY/$ECR_REPOSITORY:sha-$IMAGE_TAG"
+          LATEST="$REGISTRY/$ECR_REPOSITORY:latest"
 
           echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
-          echo "Deploying image: $IMAGE"
+          echo "latest=$LATEST" >> "$GITHUB_OUTPUT"
+
+          echo "SHA image: $IMAGE"
+          echo "Latest image: $LATEST"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -133,10 +197,11 @@ jobs:
           push: true
           tags: |
             ${{ steps.image.outputs.image }}
-            ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
+            ${{ steps.image.outputs.latest }}
           labels: |
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.created=${{ github.event.head_commit.timestamp }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -145,25 +210,35 @@ jobs:
         run: |
           set -Eeuo pipefail
 
-          aws ecr describe-images \
-            --repository-name "$ECR_REPOSITORY" \
-            --image-ids imageTag="sha-$IMAGE_TAG" \
-            --region "$AWS_REGION" >/dev/null
+          for i in $(seq 1 10); do
+            if aws ecr describe-images \
+              --repository-name "$ECR_REPOSITORY" \
+              --image-ids imageTag="sha-$IMAGE_TAG" \
+              --region "$AWS_REGION" >/dev/null 2>&1; then
+              echo "Image verified in ECR"
+              exit 0
+            fi
 
-          echo "Image verified in ECR"
+            echo "Waiting for image to appear in ECR... attempt $i/10"
+            sleep 10
+          done
+
+          echo "::error::Image verification failed in ECR"
+          exit 1
 
   deploy:
     name: Deploy to EC2
-    runs-on: ubuntu-latest
     needs: build
-    timeout-minutes: 30
-
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
     environment:
       name: production
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
       - name: Install SSH key
         shell: bash
@@ -176,10 +251,10 @@ jobs:
           printf '%s\n' "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
 
-          ssh-keyscan -H "${{ secrets.EC2_HOST }}" >> ~/.ssh/known_hosts
+          ssh-keyscan -H "${{ secrets.EC2_HOST }}" >> ~/.ssh/known_hosts || true
           chmod 600 ~/.ssh/known_hosts
 
-      - name: Upload Docker Compose file
+      - name: Test SSH connectivity
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -187,18 +262,34 @@ jobs:
           ssh \
             -i ~/.ssh/deploy_key \
             -o BatchMode=yes \
-            -o ConnectTimeout=15 \
+            -o ConnectTimeout=20 \
+            -o StrictHostKeyChecking=accept-new \
+            -o UserKnownHostsFile=~/.ssh/known_hosts \
             "${{ secrets.EC2_USERNAME }}@${{ secrets.EC2_HOST }}" \
-            "mkdir -p '${{ env.APP_DIR }}'"
+            "echo 'SSH connection ok' && uname -a"
+
+      - name: Upload docker-compose.yml
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          ssh \
+            -i ~/.ssh/deploy_key \
+            -o BatchMode=yes \
+            -o ConnectTimeout=20 \
+            -o UserKnownHostsFile=~/.ssh/known_hosts \
+            "${{ secrets.EC2_USERNAME }}@${{ secrets.EC2_HOST }}" \
+            "mkdir -p '${{ env.APP_DIR }}' && chmod 755 '${{ env.APP_DIR }}'"
 
           scp \
             -i ~/.ssh/deploy_key \
             -o BatchMode=yes \
-            -o ConnectTimeout=15 \
+            -o ConnectTimeout=20 \
+            -o UserKnownHostsFile=~/.ssh/known_hosts \
             docker-compose.yml \
             "${{ secrets.EC2_USERNAME }}@${{ secrets.EC2_HOST }}:${{ env.APP_DIR }}/docker-compose.yml"
 
-      - name: Deploy with health check and rollback
+      - name: Deploy to EC2 with rollback
         shell: bash
         env:
           EC2_HOST: ${{ secrets.EC2_HOST }}
@@ -211,16 +302,11 @@ jobs:
         run: |
           set -Eeuo pipefail
 
-          export ECR_REGISTRY
-          export ECR_IMAGE
-          export AWS_REGION_REMOTE
-          export APP_DIR_REMOTE
-          export HEALTHCHECK_URL
-
           ssh \
             -i ~/.ssh/deploy_key \
             -o BatchMode=yes \
-            -o ConnectTimeout=15 \
+            -o ConnectTimeout=20 \
+            -o UserKnownHostsFile=~/.ssh/known_hosts \
             "$EC2_USERNAME@$EC2_HOST" \
             "ECR_REGISTRY='$ECR_REGISTRY' \
              ECR_IMAGE='$ECR_IMAGE' \
@@ -230,51 +316,69 @@ jobs:
              bash -s" <<'REMOTE_SCRIPT'
           set -Eeuo pipefail
 
-          trap 'echo "Deployment failed on line $LINENO"; exit 1' ERR
+          trap 'echo "ERROR: Deployment failed at line $LINENO"; exit 1' ERR
+
+          log() {
+            echo "[$(date +'%Y-%m-%d %H:%M:%S')] $*"
+          }
 
           COMPOSE="docker compose"
           BACKUP_DIR="$APP_DIR/.deploy-backups"
+          LOGS_DIR="$APP_DIR/.deploy-logs"
           CURRENT_ENV="$APP_DIR/.env"
           PREVIOUS_ENV="$BACKUP_DIR/previous.env"
           NEW_ENV="$APP_DIR/.env.new"
 
-          mkdir -p "$APP_DIR" "$BACKUP_DIR"
+          mkdir -p "$APP_DIR" "$BACKUP_DIR" "$LOGS_DIR"
           cd "$APP_DIR"
 
-          command -v docker >/dev/null || {
-            echo "Docker is not installed on the EC2 instance"
+          log "Validating remote prerequisites..."
+          command -v docker >/dev/null 2>&1 || {
+            log "Docker is not installed"
             exit 1
           }
 
-          docker compose version >/dev/null || {
-            echo "Docker Compose v2 is not installed on the EC2 instance"
+          docker compose version >/dev/null 2>&1 || {
+            log "Docker Compose is not installed"
             exit 1
           }
 
-          command -v aws >/dev/null || {
-            echo "AWS CLI is not installed on the EC2 instance"
+          command -v aws >/dev/null 2>&1 || {
+            log "AWS CLI is not installed"
             exit 1
           }
 
-          # Save the currently deployed version for rollback.
+          command -v curl >/dev/null 2>&1 || {
+            log "curl is not installed"
+            exit 1
+          }
+
           if [ -f "$CURRENT_ENV" ]; then
             cp "$CURRENT_ENV" "$PREVIOUS_ENV"
+            log "Previous deployment backup created"
           else
             rm -f "$PREVIOUS_ENV"
+            log "No previous deployment existed"
           fi
 
-          # Authenticate with ECR.
-          aws ecr get-login-password --region "$AWS_REGION" |
-            docker login \
-              --username AWS \
-              --password-stdin "$ECR_REGISTRY"
+          log "Authenticating Docker to ECR..."
+          aws ecr get-login-password --region "$AWS_REGION" \
+            | docker login --username AWS --password-stdin "$ECR_REGISTRY"
 
-          # Pull the immutable image before stopping the running application.
-          docker pull "$ECR_IMAGE"
+          log "Pulling image: $ECR_IMAGE"
+          for i in $(seq 1 3); do
+            if docker pull "$ECR_IMAGE"; then
+              break
+            fi
+            if [ "$i" -eq 3 ]; then
+              log "Failed to pull image after 3 attempts"
+              exit 1
+            fi
+            sleep 10
+          done
 
-          # Compose must reference ${ECR_IMAGE}.
           grep -q '\${ECR_IMAGE}' docker-compose.yml || {
-            echo "docker-compose.yml must use image: \${ECR_IMAGE}"
+            log "docker-compose.yml must reference \${ECR_IMAGE}"
             exit 1
           }
 
@@ -285,47 +389,47 @@ jobs:
 
           chmod 600 "$NEW_ENV"
 
-          # Validate the new configuration before changing containers.
-          docker compose --env-file "$NEW_ENV" config >/dev/null
+          log "Validating Docker Compose config"
+          docker compose --env-file "$NEW_ENV" config >/dev/null || {
+            log "Invalid docker-compose configuration"
+            docker compose --env-file "$NEW_ENV" config
+            exit 1
+          }
 
-          # Stop the old application only after the new image has been downloaded.
-          docker compose --env-file "$CURRENT_ENV" down \
-            --remove-orphans \
-            --timeout 30 || true
+          log "Stopping current app..."
+          docker compose --env-file "$CURRENT_ENV" down --remove-orphans --timeout 30 || true
 
           mv "$NEW_ENV" "$CURRENT_ENV"
 
-          # Start the new version.
+          log "Starting new app..."
           docker compose --env-file "$CURRENT_ENV" up \
             --detach \
             --remove-orphans \
             --wait \
-            --wait-timeout 120
+            --wait-timeout 120 || {
+              log "Container startup failed"
+              docker compose --env-file "$CURRENT_ENV" logs --tail=300 || true
+              exit 1
+          }
 
-          # Verify that all services are running.
-          docker compose --env-file "$CURRENT_ENV" ps
-
+          log "Checking container health..."
           if docker compose --env-file "$CURRENT_ENV" ps | grep -Eiq 'exited|dead|unhealthy'; then
-            echo "A container is unhealthy or stopped"
-            docker compose --env-file "$CURRENT_ENV" logs --tail=200
+            log "One or more containers are unhealthy"
+            docker compose --env-file "$CURRENT_ENV" logs --tail=300 || true
             exit 1
           fi
 
-          # Optional external/application health endpoint.
           if [ -n "${HEALTHCHECK_URL:-}" ]; then
-            echo "Checking application endpoint: $HEALTHCHECK_URL"
-
+            log "Running health check against $HEALTHCHECK_URL"
             for attempt in $(seq 1 30); do
-              if curl --fail --silent --show-error \
-                --max-time 10 \
-                "$HEALTHCHECK_URL" >/dev/null; then
-                echo "Application health check passed"
+              if curl --fail --silent --show-error --max-time 10 "$HEALTHCHECK_URL" >/dev/null 2>&1; then
+                log "Health check passed"
                 break
               fi
 
-              if [ "$attempt" = "30" ]; then
-                echo "Application health check failed"
-                docker compose --env-file "$CURRENT_ENV" logs --tail=300
+              if [ "$attempt" -eq 30 ]; then
+                log "Health check failed after 30 attempts"
+                docker compose --env-file "$CURRENT_ENV" logs --tail=300 || true
                 exit 1
               fi
 
@@ -333,17 +437,17 @@ jobs:
             done
           fi
 
-          # Keep only recent deployment backups.
+          log "Cleaning up old backups..."
           find "$BACKUP_DIR" -type f -mtime +14 -delete || true
+          find "$LOGS_DIR" -type f -mtime +30 -delete || true
 
-          # Remove unused Docker layers only after a successful deployment.
           docker image prune -af --filter "until=168h" || true
+          docker container prune -af --filter "until=24h" || true
 
-          echo "Deployment completed successfully: $ECR_IMAGE"
+          log "Deployment successful: $ECR_IMAGE"
           REMOTE_SCRIPT
 
-      - name: Roll back after deployment failure
-        if: failure()
+      - name: Verify deployed services
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -351,48 +455,83 @@ jobs:
           ssh \
             -i ~/.ssh/deploy_key \
             -o BatchMode=yes \
-            -o ConnectTimeout=15 \
+            -o ConnectTimeout=20 \
+            -o UserKnownHostsFile=~/.ssh/known_hosts \
+            "${{ secrets.EC2_USERNAME }}@${{ secrets.EC2_HOST }}" \
+            "cd '${{ env.APP_DIR }}' && docker compose --env-file .env ps"
+
+      - name: Roll back on failure
+        if: failure()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          echo "Deployment failed; attempting rollback..."
+
+          ssh \
+            -i ~/.ssh/deploy_key \
+            -o BatchMode=yes \
+            -o ConnectTimeout=20 \
+            -o UserKnownHostsFile=~/.ssh/known_hosts \
             "${{ secrets.EC2_USERNAME }}@${{ secrets.EC2_HOST }}" \
             "APP_DIR='${{ env.APP_DIR }}' bash -s" <<'REMOTE_ROLLBACK'
           set -Eeuo pipefail
 
-          cd "$APP_DIR"
+          cd "$APP_DIR" || exit 1
 
           CURRENT_ENV="$APP_DIR/.env"
           PREVIOUS_ENV="$APP_DIR/.deploy-backups/previous.env"
 
           if [ ! -s "$PREVIOUS_ENV" ]; then
-            echo "No previous deployment exists; rollback is unavailable"
-            docker compose logs --tail=300 || true
+            echo "No previous deployment backup exists; rollback unavailable."
+            docker compose --env-file "$CURRENT_ENV" logs --tail=300 || true
             exit 1
           fi
 
-          echo "Rolling back to the previous deployment"
+          echo "Rolling back to previous environment..."
 
-          docker compose --env-file "$CURRENT_ENV" down \
-            --remove-orphans \
-            --timeout 30 || true
-
+          docker compose --env-file "$CURRENT_ENV" down --remove-orphans --timeout 30 || true
           cp "$PREVIOUS_ENV" "$CURRENT_ENV"
 
           docker compose --env-file "$CURRENT_ENV" pull || true
-
           docker compose --env-file "$CURRENT_ENV" up \
             --detach \
             --remove-orphans \
             --wait \
-            --wait-timeout 120
+            --wait-timeout 120 || {
+              echo "Rollback failed"
+              docker compose --env-file "$CURRENT_ENV" logs --tail=300 || true
+              exit 1
+          }
 
-          if docker compose --env-file "$CURRENT_ENV" ps |
-            grep -Eiq 'exited|dead|unhealthy'; then
-            docker compose --env-file "$CURRENT_ENV" logs --tail=300
+          if docker compose --env-file "$CURRENT_ENV" ps | grep -Eiq 'exited|dead|unhealthy'; then
+            echo "Rollback left containers unhealthy"
+            docker compose --env-file "$CURRENT_ENV" logs --tail=300 || true
             exit 1
           fi
 
-          echo "Rollback completed"
+          echo "Rollback completed successfully"
+          docker compose --env-file "$CURRENT_ENV" ps
           REMOTE_ROLLBACK
 
-      - name: Remove SSH key
+      - name: Cleanup SSH key
         if: always()
+        shell: bash
         run: |
           rm -f ~/.ssh/deploy_key
+          rm -f ~/.ssh/known_hosts
+          echo "SSH cleanup complete"
+
+  notify:
+    name: Deployment status
+    needs: [build, deploy]
+    if: always()
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Print final status
+        shell: bash
+        run: |
+          echo "Build status: ${{ needs.build.result }}"
+          echo "Deploy status: ${{ needs.deploy.result }}"
+          echo "Workflow run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
