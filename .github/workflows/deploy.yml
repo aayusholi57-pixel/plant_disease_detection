@@ -41,8 +41,15 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Validate required secrets
+           - name: Validate required secrets
         shell: bash
+        env:
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USERNAME: ${{ secrets.EC2_USERNAME }}
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
         run: |
           set -Eeuo pipefail
 
@@ -62,9 +69,12 @@ jobs:
 
           echo "All required secrets are configured."
 
-      - name: Validate Docker and compose files
+       - name: Validate Docker and compose files
         id: validate
         shell: bash
+        env:
+          ECR_IMAGE: example.invalid/plant-disease-api:validation
+          AWS_REGION: us-east-1
         run: |
           set -Eeuo pipefail
 
@@ -78,18 +88,14 @@ jobs:
             exit 1
           }
 
-          python3 - <<'PY'
-          import sys
-          import yaml
-          try:
-              with open("docker-compose.yml", "r", encoding="utf-8") as fh:
-                  yaml.safe_load(fh)
-              print("docker-compose.yml is valid YAML")
-          except Exception as exc:
-              print(f"::error::docker-compose.yml is invalid: {exc}")
-              sys.exit(1)
-          PY
+          grep -q '\${ECR_IMAGE}' docker-compose.yml || {
+            echo "::error::docker-compose.yml must reference \${ECR_IMAGE}"
+            exit 1
+          }
 
+          docker compose config --quiet
+
+          echo "Dockerfile and docker-compose.yml are valid."
           echo "valid=true" >> "$GITHUB_OUTPUT"
 
   build:
