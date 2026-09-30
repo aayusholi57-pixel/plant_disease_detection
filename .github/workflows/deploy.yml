@@ -41,11 +41,11 @@ jobs:
       uses: appleboy/ssh-action@v1.0.3
       with:
         host: ${{ secrets.EC2_HOST }}
-        username: ubuntu
+        username: ${{ secrets.EC2_USERNAME }}
         key: ${{ secrets.EC2_SSH_KEY }}
         script: |
           mkdir -p ~/app && cd ~/app
-          aws ecr get-login-password --region \({{ secrets.AWS_REGION }} | docker login --username AWS --password-stdin\){{ steps.login-ecr.outputs.registry }}
+          aws ecr get-login-password --region \({{ env.AWS_REGION }} | docker login --username AWS --password-stdin\){{ steps.login-ecr.outputs.registry }}
           docker pull \({{ steps.login-ecr.outputs.registry }}/\){{ env.ECR_REPOSITORY }}:latest
           export ECR_IMAGE=\({{ steps.login-ecr.outputs.registry }}/\){{ env.ECR_REPOSITORY }}:latest
           docker compose down || true
