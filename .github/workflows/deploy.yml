@@ -1,4 +1,3 @@
-Set-Content -Path .github/workflows/deploy.yml -Value @"
 name: Deploy Multi-Container App to AWS EC2
 
 on:
@@ -7,7 +6,7 @@ on:
       - main
 
 env:
-  AWS_REGION: `${{ secrets.AWS_REGION }}
+  AWS_REGION: ${{ secrets.AWS_REGION }}
   ECR_REPOSITORY: plant-disease-api
 
 jobs:
@@ -15,41 +14,53 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout Code
-      uses: actions/checkout@v4
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
-    - name: Configure AWS Credentials
-      uses: aws-actions/configure-aws-credentials@v4
-      with:
-        aws-access-key-id: `${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: `${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        aws-region: `${{ env.AWS_REGION }}
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
 
-    - name: Log in to AWS ECR
-      id: login-ecr
-      uses: aws-actions/amazon-ecr-login@v2
+      - name: Log in to AWS ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
 
-    - name: Build, Tag, and Push Image to ECR
-      env:
-        ECR_REGISTRY: `${{ steps.login-ecr.outputs.registry }}
-        IMAGE_TAG: `${{ github.sha }}
-      run: |
-        docker build -t `\(ECR_REGISTRY/`\)ECR_REPOSITORY:`\(IMAGE_TAG -t `\)ECR_REGISTRY/`$ECR_REPOSITORY:latest .
-        docker push `\(ECR_REGISTRY/`\)ECR_REPOSITORY:`$IMAGE_TAG
-        docker push `\(ECR_REGISTRY/`\)ECR_REPOSITORY:latest
+      - name: Build, Tag, and Push Image to ECR
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build \
+            -t "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" \
+            -t "$ECR_REGISTRY/$ECR_REPOSITORY:latest" \
+            .
 
-    - name: Deploy to EC2 via SSH
-      uses: appleboy/ssh-action@v1.0.3
-      with:
-        host: `${{ secrets.EC2_HOST }}
-        username: `${{ secrets.EC2_USERNAME }}
-        key: `${{ secrets.EC2_SSH_KEY }}
-        script: |
-          mkdir -p ~/app && cd ~/app
-          aws ecr get-login-password --region `\({{ env.AWS_REGION }} | docker login --username AWS --password-stdin `\){{ steps.login-ecr.outputs.registry }}
-          docker pull `\({{ steps.login-ecr.outputs.registry }}/`\){{ env.ECR_REPOSITORY }}:latest
-          export ECR_IMAGE=`\({{ steps.login-ecr.outputs.registry }}/`\){{ env.ECR_REPOSITORY }}:latest
-          docker compose down || true
-          docker compose up -d --remove-orphans
-          docker image prune -f
-"@
+          docker push "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+          docker push "$ECR_REGISTRY/$ECR_REPOSITORY:latest"
+
+      - name: Deploy to EC2 via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USERNAME }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            mkdir -p ~/app
+            cd ~/app
+
+            aws ecr get-login-password \
+              --region "${{ env.AWS_REGION }}" | \
+              docker login \
+                --username AWS \
+                --password-stdin "${{ steps.login-ecr.outputs.registry }}"
+
+            docker pull "${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest"
+
+            export ECR_IMAGE="${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest"
+
+            docker compose down || true
+            docker compose up -d --remove-orphans
+            docker image prune -f
