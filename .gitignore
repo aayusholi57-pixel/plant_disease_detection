@@ -53,4 +53,8 @@ Thumbs.db
 .coverage
 htmlcov/
 
-plantkey.pem
+# Private keys and certificates
+*.pem
+*.key
+*.p12
+*.pfx
