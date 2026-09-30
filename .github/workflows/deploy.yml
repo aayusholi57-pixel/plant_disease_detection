@@ -41,7 +41,8 @@ jobs:
         with:
           fetch-depth: 1
 
-           - name: Validate required secrets
+      - name: Validate required secrets
+        id: validate-secrets
         shell: bash
         env:
           AWS_REGION: ${{ secrets.AWS_REGION }}
@@ -69,7 +70,7 @@ jobs:
 
           echo "All required secrets are configured."
 
-       - name: Validate Docker and compose files
+      - name: Validate Docker and compose files
         id: validate
         shell: bash
         env:
@@ -305,6 +306,7 @@ jobs:
           AWS_REGION_REMOTE: ${{ env.AWS_REGION }}
           APP_DIR_REMOTE: ${{ env.APP_DIR }}
           HEALTHCHECK_URL: ${{ secrets.HEALTHCHECK_URL }}
+          SKIP_HEALTHCHECK: ${{ github.event.inputs.skip_healthcheck || 'false' }}
         run: |
           set -Eeuo pipefail
 
@@ -319,6 +321,7 @@ jobs:
              AWS_REGION='$AWS_REGION_REMOTE' \
              APP_DIR='$APP_DIR_REMOTE' \
              HEALTHCHECK_URL='$HEALTHCHECK_URL' \
+             SKIP_HEALTHCHECK='$SKIP_HEALTHCHECK' \
              bash -s" <<'REMOTE_SCRIPT'
           set -Eeuo pipefail
 
@@ -416,7 +419,7 @@ jobs:
               log "Container startup failed"
               docker compose --env-file "$CURRENT_ENV" logs --tail=300 || true
               exit 1
-          }
+            }
 
           log "Checking container health..."
           if docker compose --env-file "$CURRENT_ENV" ps | grep -Eiq 'exited|dead|unhealthy'; then
@@ -425,7 +428,7 @@ jobs:
             exit 1
           fi
 
-          if [ -n "${HEALTHCHECK_URL:-}" ]; then
+          if [ -n "${HEALTHCHECK_URL:-}" ] && [ "${SKIP_HEALTHCHECK:-false}" != "true" ]; then
             log "Running health check against $HEALTHCHECK_URL"
             for attempt in $(seq 1 30); do
               if curl --fail --silent --show-error --max-time 10 "$HEALTHCHECK_URL" >/dev/null 2>&1; then
@@ -441,6 +444,8 @@ jobs:
 
               sleep 5
             done
+          else
+            log "Skipping health check"
           fi
 
           log "Cleaning up old backups..."
@@ -508,7 +513,7 @@ jobs:
               echo "Rollback failed"
               docker compose --env-file "$CURRENT_ENV" logs --tail=300 || true
               exit 1
-          }
+            }
 
           if docker compose --env-file "$CURRENT_ENV" ps | grep -Eiq 'exited|dead|unhealthy'; then
             echo "Rollback left containers unhealthy"
