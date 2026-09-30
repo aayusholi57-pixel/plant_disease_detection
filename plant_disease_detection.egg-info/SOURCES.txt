@@ -1,0 +1,9 @@
+pyproject.toml
+app/__init__.py
+app/main.py
+app/model.py
+app/schema.py
+plant_disease_detection.egg-info/PKG-INFO
+plant_disease_detection.egg-info/SOURCES.txt
+plant_disease_detection.egg-info/dependency_links.txt
+plant_disease_detection.egg-info/top_level.txt
