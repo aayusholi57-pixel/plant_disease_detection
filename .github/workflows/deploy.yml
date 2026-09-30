@@ -28,11 +28,29 @@ jobs:
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
+      - name: Create ECR Repository if it does not exist
+        run: |
+          set -e
+
+          if aws ecr describe-repositories \
+            --repository-names "$ECR_REPOSITORY" \
+            --region "$AWS_REGION" > /dev/null 2>&1; then
+            echo "ECR repository '$ECR_REPOSITORY' already exists."
+          else
+            echo "Creating ECR repository '$ECR_REPOSITORY'."
+
+            aws ecr create-repository \
+              --repository-name "$ECR_REPOSITORY" \
+              --region "$AWS_REGION"
+          fi
+
       - name: Build, Tag, and Push Image to ECR
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           IMAGE_TAG: ${{ github.sha }}
         run: |
+          set -e
+
           docker build \
             -t "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" \
             -t "$ECR_REGISTRY/$ECR_REPOSITORY:latest" \
@@ -48,6 +66,8 @@ jobs:
           username: ${{ secrets.EC2_USERNAME }}
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
+            set -e
+
             mkdir -p ~/app
             cd ~/app
 
@@ -55,12 +75,14 @@ jobs:
               --region "${{ env.AWS_REGION }}" | \
               docker login \
                 --username AWS \
-                --password-stdin "${{ steps.login-ecr.outputs.registry }}"
-
-            docker pull "${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest"
+                --password-stdin \
+                "${{ steps.login-ecr.outputs.registry }}"
 
             export ECR_IMAGE="${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest"
 
+            docker pull "$ECR_IMAGE"
+
             docker compose down || true
             docker compose up -d --remove-orphans
+
             docker image prune -f
