@@ -32,17 +32,7 @@ jobs:
         run: |
           aws ecr describe-repositories --repository-names \({{ env.ECR_REPOSITORY }} --region\){{ env.AWS_REGION }} || aws ecr create-repository --repository-name \({{ env.ECR_REPOSITORY }} --region\){{ env.AWS_REGION }}
 
-          if aws ecr describe-repositories \
-            --repository-names "$ECR_REPOSITORY" \
-            --region "$AWS_REGION" > /dev/null 2>&1; then
-            echo "ECR repository '$ECR_REPOSITORY' already exists."
-          else
-            echo "Creating ECR repository '$ECR_REPOSITORY'."
-
-            aws ecr create-repository \
-              --repository-name "$ECR_REPOSITORY" \
-              --region "$AWS_REGION"
-          fi
+          
 
       - name: Build, Tag, and Push Image to ECR
         env:
