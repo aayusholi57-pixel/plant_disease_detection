@@ -1,0 +1,17 @@
+services:
+  api:
+    image: ${ECR_IMAGE:-plant-disease-api:latest}
+    container_name: plant-disease-api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - wget --no-verbose --tries=1 --spider http://127.0.0.1:8000/health || exit 1
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
