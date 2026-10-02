@@ -1,65 +1,93 @@
-"""Reproducible ResNet18 training entry point."""
-from __future__ import annotations
-import argparse, json, random
-from pathlib import Path
-import numpy as np
+import os
 import torch
 import torch.nn as nn
-from torchvision import models
-from scripts.dataset import MEAN, STD, build_loaders
+import torch.optim as optim
+from torch.utils.data import DataLoader, random_split
+from torchvision import datasets, models, transforms
 
-def seed_everything(seed: int):
-    random.seed(seed); np.random.seed(seed); torch.manual_seed(seed)
-    if torch.cuda.is_available(): torch.cuda.manual_seed_all(seed)
+def fine_tune_model():
+    # 1. Device configuration (use GPU if available)
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
 
-def build_model(num_classes: int, pretrained: bool = True):
-    weights = models.ResNet18_Weights.DEFAULT if pretrained else None
-    model = models.resnet18(weights=weights)
-    for parameter in model.parameters(): parameter.requires_grad = False
+    # 2. Data Augmentation and Normalization
+    transform = transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.RandomHorizontalFlip(),
+        transforms.RandomRotation(15),
+        transforms.ToTensor(),
+        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+    ])
+
+    data_dir = './data/raw'
+    if not os.path.exists(data_dir):
+        print(f"Error: Local dataset folder '{data_dir}' not found!")
+        return
+
+    # Load dataset from class folders
+    full_dataset = datasets.ImageFolder(data_dir, transform=transform)
+    class_names = full_dataset.classes
+    num_classes = len(class_names)
+    print(f"Found {len(full_dataset)} images across {num_classes} classes.")
+    print(f"Classes: {class_names}")
+
+    # 3. Split into 80% Training and 20% Validation
+    train_size = int(0.8 * len(full_dataset))
+    val_size = len(full_dataset) - train_size
+    train_dataset, val_dataset = random_split(full_dataset, [train_size, val_size])
+
+    dataloaders = {
+        'train': DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=2),
+        'val': DataLoader(val_dataset, batch_size=32, shuffle=False, num_workers=2)
+    }
+
+    # 4. Load Pre-trained ResNet18 and Modify Classifier
+    model = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
+
+    # Freeze feature extraction layers, train only the classifier head
+    for param in model.parameters():
+        param.requires_grad = False
+
     model.fc = nn.Linear(model.fc.in_features, num_classes)
-    return model
+    model = model.to(device)
 
-def train(args):
-    seed_everything(args.seed)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    train_loader, val_loader, class_names = build_loaders(
-        data_dir=args.data_dir, batch_size=args.batch_size, num_workers=args.num_workers,
-        image_size=args.image_size, val_split=args.val_split, seed=args.seed)
-    model = build_model(len(class_names), not args.no_pretrained).to(device)
+    # 5. Loss Function and Optimizer
     criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(model.fc.parameters(), lr=args.learning_rate)
-    history=[]; best=-1.0
-    output=Path(args.output); output.parent.mkdir(parents=True, exist_ok=True)
-    for epoch in range(1, args.epochs+1):
-        model.train(); train_loss=correct=total=0
-        for images, labels in train_loader:
-            images,labels=images.to(device),labels.to(device)
-            optimizer.zero_grad(set_to_none=True); logits=model(images)
-            loss=criterion(logits,labels); loss.backward(); optimizer.step()
-            train_loss += loss.item()*images.size(0); correct += (logits.argmax(1)==labels).sum().item(); total += labels.size(0)
-        model.eval(); val_loss=val_correct=val_total=0
-        with torch.inference_mode():
-            for images,labels in val_loader:
-                images,labels=images.to(device),labels.to(device); logits=model(images); loss=criterion(logits,labels)
-                val_loss += loss.item()*images.size(0); val_correct += (logits.argmax(1)==labels).sum().item(); val_total += labels.size(0)
-        metrics={"epoch":epoch,"train_loss":train_loss/total,"train_accuracy":correct/total,"val_loss":val_loss/val_total,"val_accuracy":val_correct/val_total}
-        history.append(metrics); print(json.dumps(metrics))
-        if metrics["val_accuracy"] > best:
-            best=metrics["val_accuracy"]
-            torch.save({"artifact_version":1,"model_name":"resnet18","state_dict":model.state_dict(),
-                        "class_names":class_names,"num_classes":len(class_names),"image_size":args.image_size,
-                        "mean":MEAN,"std":STD,"seed":args.seed,"dataset":"PlantVillage / emmarex/plantdisease",
-                        "best_val_accuracy":best,"history":history}, output)
-    Path(args.history).parent.mkdir(parents=True, exist_ok=True)
-    Path(args.history).write_text(json.dumps(history,indent=2),encoding="utf-8")
-    print(f"Saved model artifact: {output}")
+    optimizer = optim.Adam(model.fc.parameters(), lr=0.001)
 
-def parse_args():
-    p=argparse.ArgumentParser()
-    p.add_argument("--data-dir",default="data/raw"); p.add_argument("--output",default="models/plant_disease_resnet18.pth")
-    p.add_argument("--history",default="reports/training_history.json"); p.add_argument("--epochs",type=int,default=5)
-    p.add_argument("--batch-size",type=int,default=32); p.add_argument("--learning-rate",type=float,default=1e-3)
-    p.add_argument("--val-split",type=float,default=0.2); p.add_argument("--image-size",type=int,default=224)
-    p.add_argument("--seed",type=int,default=42); p.add_argument("--num-workers",type=int,default=2)
-    p.add_argument("--no-pretrained",action="store_true"); return p.parse_args()
-if __name__=="__main__": train(parse_args())
+    # 6. Training Loop
+    num_epochs = 5
+    print("\nStarting fine-tuning...")
+
+    for epoch in range(num_epochs):
+        model.train()
+        running_loss = 0.0
+        running_corrects = 0
+
+        for inputs, labels in dataloaders['train']:
+            inputs, labels = inputs.to(device), labels.to(device)
+
+            optimizer.zero_grad()
+            outputs = model(inputs)
+            _, preds = torch.max(outputs, 1)
+            loss = criterion(outputs, labels)
+
+            loss.backward()
+            optimizer.step()
+
+            running_loss += loss.item() * inputs.size(0)
+            running_corrects += torch.sum(preds == labels.data)
+
+        epoch_loss = running_loss / train_size
+        epoch_acc = running_corrects.double() / train_size
+
+        print(f"Epoch {epoch+1}/{num_epochs} - Loss: {epoch_loss:.4f} - Accuracy: {epoch_acc:.4f}")
+
+    # 7. Save the fine-tuned model weights locally
+    os.makedirs('./models', exist_ok=True)
+    save_path = './models/plant_disease_resnet18.pth'
+    torch.save(model.state_dict(), save_path)
+    print(f"\nFine-tuned model successfully saved to {save_path}!")
+
+if __name__ == '__main__':
+    fine_tune_model()

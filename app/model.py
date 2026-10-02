@@ -18,18 +18,28 @@ class LeafClassifier:
         path = Path(model_path)
         if not path.is_file():
             raise FileNotFoundError(f"Model artifact not found at {path}. Run the training pipeline first.")
+
+        
         checkpoint: dict[str, Any] = torch.load(path, map_location=DEVICE)
-        if not isinstance(checkpoint, dict) or "state_dict" not in checkpoint:
-            raise ValueError("Unsupported checkpoint format: expected self-contained artifact.")
-        self.class_names = list(checkpoint.get("class_names", []))
-        if not self.class_names:
-            raise ValueError("Checkpoint contains no class_names metadata.")
-        self.image_size = int(checkpoint.get("image_size", 224))
-        mean = tuple(checkpoint.get("mean", DEFAULT_MEAN))
-        std = tuple(checkpoint.get("std", DEFAULT_STD))
-        self.model = models.resnet18(weights=None)
-        self.model.fc = nn.Linear(self.model.fc.in_features, len(self.class_names))
-        self.model.load_state_dict(checkpoint["state_dict"])
+        if not isinstance(checkpoint, dict):
+            raise ValueError("Unsupported checkpoint format: expected a checkpoint dictionary.")
+
+        # Extract state dict safely from common wrapper keys
+        if "model_state_dict" in checkpoint and isinstance(checkpoint["model_state_dict"], dict):
+            state_dict = checkpoint["model_state_dict"]
+        elif "state_dict" in checkpoint and isinstance(checkpoint["state_dict"], dict):
+            state_dict = checkpoint["state_dict"]
+        else:
+            state_dict = checkpoint
+
+        # Strip out any stray non-tensor metadata keys (like classes, epochs, etc.)
+        state_dict = {k: v for k, v in state_dict.items() if isinstance(v, torch.Tensor)}
+
+        if not state_dict:
+            raise ValueError("Unsupported checkpoint format: missing model weights tensors.")
+            for key, value in state_dict.items()
+        }
+        self.model.load_state_dict(state_dict)
         self.model.to(DEVICE)
         self.model.eval()
         self.transform = transforms.Compose([
@@ -41,7 +51,20 @@ class LeafClassifier:
     def predict(self, image_bytes: bytes) -> tuple[str, str, float]:
         try:
             image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-        except (UnidentifiedImageError, OSError) as exc:
+        except (UnidentifiedImageError, OSError) as exc:checkpoint: dict[str, Any] = torch.load(path, map_location=DEVICE)
+        if not isinstance(checkpoint, dict):
+            raise ValueError("Unsupported checkpoint format: expected a checkpoint dictionary.")
+
+        state_dict = checkpoint.get("state_dict") or checkpoint.get("model_state_dict")
+        while isinstance(state_dict, dict) and isinstance(state_dict.get("model_state_dict"), dict):
+            state_dict = state_dict["model_state_dict"]
+        if not isinstance(state_dict, dict):
+            raise ValueError("Unsupported checkpoint format: missing model weights.")
+
+        class_metadata = checkpoint.get("class_names") or checkpoint.get("classes")
+        if not class_metadata and isinstance(checkpoint.get("state_dict"), dict):
+            class_metadata = checkpoint["state_dict"].get("classes")
+        if isinstance(class_metadata, dict):
             raise ValueError("The uploaded file is not a valid image.") from exc
         tensor_img = self.transform(image).unsqueeze(0).to(DEVICE)
         with torch.inference_mode():
