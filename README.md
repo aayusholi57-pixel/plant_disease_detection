@@ -75,15 +75,22 @@ The project takes a plant-leaf image, runs it through a trained ResNet18 classif
                                  ▼
                     ┌─────────────────────────┐
                     │ Pretrained ResNet18     │
-                    │                         │
-                    │ Backbone frozen         │
-                    │ Classification head     │
-                    │ trained for plant data  │
+                    │     ImageNet Weights    │
                     └────────────┬────────────┘
                                  │
                                  ▼
                     ┌─────────────────────────┐
-                    │ Trained Model           │
+                    │   FINE-TUNING STAGE     │
+                    │                         │
+                    │ • Adapt classifier      │
+                    │ • Train on plant data   │
+                    │ • Learn plant-specific  │
+                    │   visual patterns       │
+                    └────────────┬────────────┘
+                                 │
+                                 ▼
+                    ┌─────────────────────────┐
+                    │ Fine-Tuned ResNet18     │
                     │ plant_disease_resnet18  │
                     │ .pth                    │
                     └────────────┬────────────┘
@@ -251,16 +258,14 @@ So this project uses **transfer learning with a trainable classification head**.
 
 ---
 
-# 🎯 What "Fine-Tuning" Means Here
+# 🎯 Fine-Tuning Stage
 
-In this project, the pretrained ResNet18 model is adapted to plant-disease classes.
+Fine-tuning is the training stage where the pretrained ResNet18 is adapted to the plant-disease dataset.
 
-The basic idea is:
+The project workflow is:
 
 ```text
 Pretrained ResNet18
-        │
-        ├── Learned visual features
         │
         ▼
 Replace ImageNet classifier
@@ -269,16 +274,20 @@ Replace ImageNet classifier
 Plant-disease classifier
         │
         ▼
-Train on plant-leaf images
+Fine-tuning / training on plant-leaf images
+        │
+        ▼
+Fine-Tuned ResNet18
 ```
 
-The current training code freezes the backbone and trains the new final classification layer.
+### What happens during fine-tuning?
 
-That is commonly described as **transfer learning / head fine-tuning**.
+- ResNet18 starts with pretrained ImageNet knowledge.
+- The original ImageNet classification layer is replaced for the plant-disease classes.
+- The model is trained using the plant-leaf dataset.
+- The resulting weights are saved as the plant-disease model artifact.
 
-Full-network fine-tuning would instead allow some or all ResNet18 backbone layers to update during training.
-
----
+> **Implementation note:** The current `scripts/train.py` freezes the ResNet18 backbone and trains the new classification head. This is transfer learning (often called head fine-tuning). If the backbone is unfrozen, the same pipeline can perform partial or full-network fine-tuning.
 
 # 📦 Model Artifact
 
