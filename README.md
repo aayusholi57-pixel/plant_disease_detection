@@ -30,6 +30,145 @@ docs/                   project documentation
 .github/workflows/      CI and model-training automation
 ```
 
+## Full Architecture
+
+The complete repository is organized as a reproducible ML training pipeline, evaluation layer, inference API, testing layer, containerization layer, and GitHub Actions automation.
+
+### Repository Architecture
+
+```text
+plant_disease_detection/
+├── app/
+│   ├── __init__.py
+│   ├── main.py                    # FastAPI application, /health and /predict endpoints
+│   ├── model.py                   # ResNet18 loading, preprocessing and inference
+│   └── schemas.py                 # Pydantic API response schema
+│
+├── data/
+│   └── raw/
+│       └── .gitkeep               # Dataset location; downloaded data is not committed
+│
+├── models/
+│   ├── .gitkeep
+│   ├── README.md                  # Model artifact documentation
+│   ├── plant_disease_resnet18.pth # Self-contained ResNet18 model artifact
+│   └── training_history.png       # Training history visualization
+│
+├── notebooks/
+│   └── plant_disease_training.ipynb # Original training/learning notebook
+│
+├── scripts/
+│   ├── __init__.py
+│   ├── convert_checkpoint.py       # Converts a state_dict into the self-contained artifact format
+│   ├── dataset.py                  # ImageFolder dataset, transforms and deterministic split
+│   ├── download_dataset.py         # Downloads and prepares the public PlantDisease dataset
+│   ├── evaluate.py                 # Accuracy, F1, classification report and confusion matrix
+│   └── train.py                    # Reproducible ResNet18 training entry point
+│
+├── tests/
+│   ├── __init__.py
+│   ├── test_api.py                 # API behavior tests
+│   └── test_model.py               # Model/inference tests
+│
+├── docs/
+│   └── PROJECT_DOCUMENTATION.md    # Detailed project documentation
+│
+├── .github/
+│   └── workflows/
+│       ├── ci.yml                  # Compile checks and automated tests
+│       ├── deploy.yml              # Deployment automation
+│       └── train-model.yml         # Dataset download, training, evaluation and artifact upload
+│
+├── .dockerignore
+├── .gitattributes
+├── .gitignore
+├── Dockerfile                      # Production container image
+├── docker-compose.yml              # Container runtime configuration
+├── pyproject.toml                  # Python project/package configuration
+├── requirements.txt                # Runtime dependencies
+├── requirements-dev.txt            # Development and testing dependencies
+└── README.md                       # Project overview and usage guide
+```
+
+### End-to-End Code Flow
+
+```text
+Public PlantDisease Dataset
+          │
+          ▼
+ scripts/download_dataset.py
+          │
+          ▼
+      data/raw/
+          │
+          ▼
+    scripts/dataset.py
+    ├── Resize to 224×224
+    ├── Random horizontal flip + rotation (training)
+    ├── ImageNet normalization
+    └── Deterministic 80/20 split (seed 42)
+          │
+          ▼
+      scripts/train.py
+          │
+          ├── Pretrained ResNet18 backbone
+          ├── Frozen backbone
+          └── Trainable classification head
+          │
+          ▼
+ models/plant_disease_resnet18.pth
+          │
+          ├── ResNet18 state_dict
+          ├── class_names
+          ├── preprocessing metadata
+          └── training metadata
+          │
+          ├───────────────► scripts/evaluate.py
+          │                    │
+          │                    └── accuracy / macro-F1 / weighted-F1 /
+          │                        classification report / confusion matrix
+          │
+          ▼
+      app/model.py
+          │
+          ├── Load self-contained checkpoint
+          ├── Recreate ResNet18 architecture
+          ├── Apply inference preprocessing
+          └── Run prediction + confidence
+          │
+          ▼
+       app/main.py
+          │
+          ├── GET /health
+          └── POST /predict
+          │
+          ▼
+     FastAPI + Swagger/OpenAPI
+          │
+          ▼
+        Docker
+```
+
+### Automation Flow
+
+```text
+GitHub Actions
+   │
+   ├── CI (ci.yml)
+   │     ├── Install dependencies
+   │     ├── Compile app/scripts/tests
+   │     └── Run pytest
+   │
+   ├── Model Training (train-model.yml)
+   │     ├── Download dataset
+   │     ├── Train ResNet18
+   │     ├── Evaluate model
+   │     └── Upload model + reports as artifacts
+   │
+   └── Deployment (deploy.yml)
+         └── Deployment automation
+```
+
 ## Quick start
 
 Python 3.10 is recommended.
